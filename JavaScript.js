@@ -1,4 +1,3 @@
-// استبدل startScraping:
 async function startScraping(channel, count) {
     try {
         const formData = new FormData();

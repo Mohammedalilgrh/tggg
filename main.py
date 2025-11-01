@@ -66,7 +66,8 @@ class TelegramScraper:
 
     async def start_client(self):
         try:
-            await self.client.start(phone=self.phone)
+            await self.client.start(phone=self.phone,
+    code_callback=lambda: os.getenv("PHONE_CODE")
             me = await self.client.get_me()
             logging.info(f"Logged in as {me.username or me.id}")
             return True

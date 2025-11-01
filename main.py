@@ -11,7 +11,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Form
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 import uvicorn
 from telethon import TelegramClient, functions, types
 from telethon.errors import (
@@ -43,15 +42,15 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 active_tasks = {}
 task_status = {}
 scraped_users_queue = asyncio.Queue()
-MAX_CONCURRENT_ADDITIONS = 2  # Limit concurrent additions to avoid bans
+MAX_CONCURRENT_ADDITIONS = 2
 
 # Anti-ban configuration
 ANTI_BAN_CONFIG = {
-    'delay_between_adds': random.uniform(30, 60),  # 30-60 seconds between adds
-    'max_daily_adds': 50,  # Maximum adds per day
-    'chunk_size': 10,  # Process users in chunks
+    'delay_between_adds': random.uniform(30, 60),
+    'max_daily_adds': 50,
+    'chunk_size': 10,
     'random_delay': True,
-    'auto_pause_hours': [2, 3, 4],  # Auto-pause during night hours (2AM-5AM)
+    'auto_pause_hours': [2, 3, 4],
 }
 
 class ScrapeConfig(BaseModel):
@@ -72,39 +71,7 @@ class TaskStatus(BaseModel):
     message: str
     type: str
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
-    logger.info("Starting Telegram Client...")
-    global client
-    client = TelegramClient(SESSION_STRING, int(API_ID), API_HASH)
-    
-    try:
-        await client.start(phone=PHONE_NUMBER)
-        if await client.is_user_authorized():
-            me = await client.get_me()
-            logger.info(f"Connected as {me.first_name} (@{me.username})")
-        else:
-            logger.error("Not authorized! Please check your session.")
-    except Exception as e:
-        logger.error(f"Failed to connect: {e}")
-    
-    yield
-    
-    # Shutdown
-    if client.is_connected():
-        await client.disconnect()
-        logger.info("Telegram client disconnected")
-
-app = FastAPI(title="Telegram Group Manager", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
-
-# Create necessary directories
-os.makedirs("static", exist_ok=True)
-os.makedirs("templates", exist_ok=True)
-
-# HTML Templates
+# HTML Template as string
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -117,29 +84,38 @@ HTML_TEMPLATE = """
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: Arial, sans-serif; background: #0f0f0f; color: white; }
         .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
-        .header { text-align: center; margin-bottom: 30px; }
+        .header { text-align: center; margin-bottom: 30px; padding: 20px; background: #1a1a1a; border-radius: 10px; }
         .dashboard { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 30px; }
         .card { background: #1a1a1a; padding: 20px; border-radius: 10px; border: 1px solid #333; }
         .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px; }
         .stat-card { background: #2a2a2a; padding: 15px; border-radius: 8px; text-align: center; }
-        .controls { display: flex; gap: 10px; margin: 10px 0; }
-        button { padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .controls { display: flex; gap: 10px; margin: 10px 0; flex-wrap: wrap; }
+        button { padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; transition: all 0.3s; }
+        button:hover { opacity: 0.8; }
         .btn-start { background: #00c853; color: white; }
         .btn-pause { background: #ff9800; color: white; }
         .btn-stop { background: #f44336; color: white; }
         .btn-resume { background: #2196f3; color: white; }
         .form-group { margin: 15px 0; }
-        label { display: block; margin-bottom: 5px; color: #ccc; }
-        input, select { width: 100%; padding: 10px; background: #2a2a2a; border: 1px solid #444; border-radius: 5px; color: white; }
+        label { display: block; margin-bottom: 5px; color: #ccc; font-weight: bold; }
+        input, select { width: 100%; padding: 12px; background: #2a2a2a; border: 1px solid #444; border-radius: 5px; color: white; font-size: 14px; }
+        input:focus, select:focus { outline: none; border-color: #2196f3; }
         .task-list { margin-top: 20px; }
         .task-item { background: #2a2a2a; padding: 15px; margin: 10px 0; border-radius: 8px; border-left: 4px solid #2196f3; }
-        .progress-bar { width: 100%; height: 10px; background: #333; border-radius: 5px; margin: 10px 0; }
-        .progress-fill { height: 100%; background: #2196f3; border-radius: 5px; transition: width 0.3s; }
-        .live-feed { max-height: 300px; overflow-y: auto; background: #1a1a1a; padding: 15px; border-radius: 8px; }
-        .log-entry { padding: 5px 0; border-bottom: 1px solid #333; font-family: monospace; font-size: 12px; }
-        .status-running { color: #00c853; }
-        .status-paused { color: #ff9800; }
-        .status-stopped { color: #f44336; }
+        .progress-bar { width: 100%; height: 10px; background: #333; border-radius: 5px; margin: 10px 0; overflow: hidden; }
+        .progress-fill { height: 100%; background: linear-gradient(90deg, #2196f3, #21cbf3); border-radius: 5px; transition: width 0.3s; }
+        .live-feed { max-height: 300px; overflow-y: auto; background: #1a1a1a; padding: 15px; border-radius: 8px; font-family: 'Courier New', monospace; }
+        .log-entry { padding: 8px 0; border-bottom: 1px solid #333; font-size: 12px; color: #ccc; }
+        .status-running { color: #00c853; font-weight: bold; }
+        .status-paused { color: #ff9800; font-weight: bold; }
+        .status-stopped { color: #f44336; font-weight: bold; }
+        .status-completed { color: #4caf50; font-weight: bold; }
+        .status-error { color: #f44336; font-weight: bold; }
+        .protection-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 10px; }
+        .protection-item { background: #2a2a2a; padding: 10px; border-radius: 5px; font-size: 12px; }
+        .success { color: #4caf50; }
+        .warning { color: #ff9800; }
+        .error { color: #f44336; }
     </style>
 </head>
 <body>
@@ -147,24 +123,23 @@ HTML_TEMPLATE = """
         <div class="header">
             <h1>🤖 Telegram Group Manager</h1>
             <p>Automated Member Scraping & Adding with Anti-Ban Protection</p>
-        </div>
-
-        <div class="stats">
-            <div class="stat-card">
-                <h3>📊 Total Users</h3>
-                <p id="total-users">0</p>
-            </div>
-            <div class="stat-card">
-                <h3>✅ Added Today</h3>
-                <p id="added-today">0</p>
-            </div>
-            <div class="stat-card">
-                <h3>⚡ Active Tasks</h3>
-                <p id="active-tasks">0</p>
-            </div>
-            <div class="stat-card">
-                <h3>🛡️ Protection</h3>
-                <p id="protection-status">Active</p>
+            <div class="stats" id="statsContainer">
+                <div class="stat-card">
+                    <h3>📊 Total Users</h3>
+                    <p id="total-users">0</p>
+                </div>
+                <div class="stat-card">
+                    <h3>✅ Added Today</h3>
+                    <p id="added-today">0</p>
+                </div>
+                <div class="stat-card">
+                    <h3>⚡ Active Tasks</h3>
+                    <p id="active-tasks">0</p>
+                </div>
+                <div class="stat-card">
+                    <h3>🛡️ Protection</h3>
+                    <p id="protection-status" class="success">Active</p>
+                </div>
             </div>
         </div>
 
@@ -174,13 +149,13 @@ HTML_TEMPLATE = """
                 <form id="scrapeForm" onsubmit="startScraping(event)">
                     <div class="form-group">
                         <label for="sourceGroup">Source Group Username:</label>
-                        <input type="text" id="sourceGroup" placeholder="@username" required>
+                        <input type="text" id="sourceGroup" placeholder="@username or +123456789" required>
                     </div>
                     <div class="form-group">
                         <label for="scrapeLimit">Number of Members to Scrape:</label>
-                        <input type="number" id="scrapeLimit" value="100" min="1" max="10000">
+                        <input type="number" id="scrapeLimit" value="100" min="1" max="10000" required>
                     </div>
-                    <button type="submit" class="btn-start">Start Scraping</button>
+                    <button type="submit" class="btn-start">🚀 Start Scraping</button>
                 </form>
             </div>
 
@@ -189,7 +164,7 @@ HTML_TEMPLATE = """
                 <form id="addForm" onsubmit="startAdding(event)">
                     <div class="form-group">
                         <label for="targetGroup">Target Group Username:</label>
-                        <input type="text" id="targetGroup" placeholder="@username" required>
+                        <input type="text" id="targetGroup" placeholder="@username or +123456789" required>
                     </div>
                     <div class="form-group">
                         <label for="usersPerHour">Users Per Hour (Safe Limit):</label>
@@ -200,7 +175,7 @@ HTML_TEMPLATE = """
                             <option value="50">50 (Aggressive)</option>
                         </select>
                     </div>
-                    <button type="submit" class="btn-start">Start Adding</button>
+                    <button type="submit" class="btn-start">🚀 Start Adding</button>
                 </form>
             </div>
         </div>
@@ -208,43 +183,62 @@ HTML_TEMPLATE = """
         <div class="card">
             <h2>📈 Active Tasks</h2>
             <div id="taskList" class="task-list">
-                <!-- Tasks will be populated here -->
+                <div class="task-item" style="text-align: center; color: #666;" id="noTasks">
+                    No active tasks. Start scraping or adding members to begin.
+                </div>
             </div>
         </div>
 
         <div class="card">
             <h2>📊 Live Activity Feed</h2>
             <div id="liveFeed" class="live-feed">
-                <!-- Live logs will appear here -->
+                <div class="log-entry">[System] Application started successfully</div>
+                <div class="log-entry">[System] Ready to scrape and add members</div>
             </div>
         </div>
 
         <div class="card">
             <h2>🛡️ Anti-Ban Protection Status</h2>
-            <div id="protectionInfo">
-                <p>✅ Delays between actions: 30-60 seconds</p>
-                <p>✅ Daily limit: 50 users</p>
-                <p>✅ Automatic night pause: 2AM-5AM</p>
-                <p>✅ Concurrent limit: 2 operations</p>
-                <p>✅ Random delays enabled</p>
+            <div class="protection-grid">
+                <div class="protection-item success">✅ Delays: 30-60 seconds</div>
+                <div class="protection-item success">✅ Daily limit: 50 users</div>
+                <div class="protection-item success">✅ Night pause: 2AM-5AM</div>
+                <div class="protection-item success">✅ Concurrent: 2 operations</div>
+                <div class="protection-item success">✅ Random delays: Enabled</div>
+                <div class="protection-item success">✅ Flood detection: Active</div>
             </div>
         </div>
     </div>
 
     <script>
         let eventSource = null;
+        let statsInterval = null;
         
         function startScraping(event) {
             event.preventDefault();
             const sourceGroup = document.getElementById('sourceGroup').value;
             const limit = document.getElementById('scrapeLimit').value;
             
+            if (!sourceGroup) {
+                addLog('❌ Please enter a source group username', 'error');
+                return;
+            }
+            
+            addLog(`🔍 Starting to scrape ${limit} members from ${sourceGroup}`, 'info');
+            
             fetch('/api/scrape', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({source_group: sourceGroup, limit: parseInt(limit)})
-            }).then(r => r.json()).then(data => {
-                addLog(`Started scraping: ${sourceGroup} (Limit: ${limit})`);
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'started') {
+                    addLog(`✅ Scraping task started: ${data.task_id}`, 'success');
+                }
+            })
+            .catch(error => {
+                addLog(`❌ Failed to start scraping: ${error}`, 'error');
             });
         }
         
@@ -253,106 +247,173 @@ HTML_TEMPLATE = """
             const targetGroup = document.getElementById('targetGroup').value;
             const usersPerHour = document.getElementById('usersPerHour').value;
             
+            if (!targetGroup) {
+                addLog('❌ Please enter a target group username', 'error');
+                return;
+            }
+            
+            addLog(`📤 Starting to add members to ${targetGroup} (${usersPerHour}/hour)`, 'info');
+            
             fetch('/api/add-members', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({target_group: targetGroup, users_per_hour: parseInt(usersPerHour)})
-            }).then(r => r.json()).then(data => {
-                addLog(`Started adding to: ${targetGroup} (${usersPerHour}/hour)`);
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'started') {
+                    addLog(`✅ Adding task started: ${data.task_id}`, 'success');
+                }
+            })
+            .catch(error => {
+                addLog(`❌ Failed to start adding: ${error}`, 'error');
             });
         }
         
         function controlTask(taskId, action) {
             fetch(`/api/tasks/${taskId}/${action}`, {method: 'POST'})
                 .then(r => r.json())
-                .then(data => addLog(`Task ${taskId}: ${action}`));
+                .then(data => addLog(`⚡ Task ${taskId}: ${action}`, 'info'))
+                .catch(error => addLog(`❌ Failed to control task: ${error}`, 'error'));
         }
         
-        function addLog(message) {
+        function addLog(message, type = 'info') {
             const feed = document.getElementById('liveFeed');
             const entry = document.createElement('div');
             entry.className = 'log-entry';
-            entry.innerHTML = `[${new Date().toLocaleTimeString()}] ${message}`;
+            
+            const timestamp = new Date().toLocaleTimeString();
+            const icon = type === 'error' ? '❌' : type === 'success' ? '✅' : '⚡';
+            
+            entry.innerHTML = `[${timestamp}] ${icon} ${message}`;
             feed.appendChild(entry);
             feed.scrollTop = feed.scrollHeight;
         }
         
         function updateStats() {
-            fetch('/api/stats').then(r => r.json()).then(stats => {
-                document.getElementById('total-users').textContent = stats.total_users;
-                document.getElementById('added-today').textContent = stats.added_today;
-                document.getElementById('active-tasks').textContent = stats.active_tasks;
-            });
-            
-            fetch('/api/tasks').then(r => r.json()).then(tasks => {
-                const taskList = document.getElementById('taskList');
-                taskList.innerHTML = '';
-                
-                tasks.forEach(task => {
-                    const taskEl = document.createElement('div');
-                    taskEl.className = 'task-item';
-                    taskEl.innerHTML = `
-                        <h4>${task.type.toUpperCase()}: ${task.task_id}</h4>
-                        <p>Status: <span class="status-${task.status}">${task.status}</span></p>
-                        <p>${task.message}</p>
-                        <div class="progress-bar">
-                            <div class="progress-fill" style="width: ${task.progress}%"></div>
-                        </div>
-                        <p>Progress: ${task.progress}% (${Math.round(task.progress * task.total / 100)}/${task.total})</p>
-                        <div class="controls">
-                            ${task.status === 'running' ? 
-                                '<button class="btn-pause" onclick="controlTask(\'' + task.task_id + '\', \'pause\')">Pause</button>' : 
-                                '<button class="btn-resume" onclick="controlTask(\'' + task.task_id + '\', \'resume\')">Resume</button>'
-                            }
-                            <button class="btn-stop" onclick="controlTask(\'' + task.task_id + '\', \'stop\')">Stop</button>
-                        </div>
-                    `;
-                    taskList.appendChild(taskEl);
-                });
-            });
+            fetch('/api/stats')
+                .then(r => r.json())
+                .then(stats => {
+                    document.getElementById('total-users').textContent = stats.total_users;
+                    document.getElementById('added-today').textContent = stats.added_today;
+                    document.getElementById('active-tasks').textContent = stats.active_tasks;
+                })
+                .catch(error => console.error('Failed to update stats:', error));
+        }
+        
+        function updateTasks() {
+            fetch('/api/tasks')
+                .then(r => r.json())
+                .then(tasks => {
+                    const taskList = document.getElementById('taskList');
+                    const noTasks = document.getElementById('noTasks');
+                    
+                    if (tasks.length === 0) {
+                        noTasks.style.display = 'block';
+                        taskList.innerHTML = '';
+                        taskList.appendChild(noTasks);
+                    } else {
+                        noTasks.style.display = 'none';
+                        taskList.innerHTML = '';
+                        
+                        tasks.forEach(task => {
+                            const taskEl = document.createElement('div');
+                            taskEl.className = 'task-item';
+                            taskEl.innerHTML = `
+                                <h4>${task.type.toUpperCase()} TASK: ${task.task_id}</h4>
+                                <p>Status: <span class="status-${task.status}">${task.status.toUpperCase()}</span></p>
+                                <p>${task.message}</p>
+                                <div class="progress-bar">
+                                    <div class="progress-fill" style="width: ${task.progress}%"></div>
+                                </div>
+                                <p>Progress: ${task.progress}%</p>
+                                <div class="controls">
+                                    ${task.status === 'running' ? 
+                                        '<button class="btn-pause" onclick="controlTask(\'' + task.task_id + '\', \'pause\')">⏸️ Pause</button>' : 
+                                        '<button class="btn-resume" onclick="controlTask(\'' + task.task_id + '\', \'resume\')">▶️ Resume</button>'
+                                    }
+                                    <button class="btn-stop" onclick="controlTask(\'' + task.task_id + '\', \'stop\')">⏹️ Stop</button>
+                                </div>
+                            `;
+                            taskList.appendChild(taskEl);
+                        });
+                    }
+                })
+                .catch(error => console.error('Failed to update tasks:', error));
         }
         
         // Connect to SSE for live updates
         function connectSSE() {
             eventSource = new EventSource('/api/stream');
             eventSource.onmessage = function(event) {
-                const data = JSON.parse(event.data);
-                if (data.type === 'log') {
-                    addLog(data.message);
-                } else if (data.type === 'stats_update') {
-                    updateStats();
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'log') {
+                        addLog(data.message, data.level || 'info');
+                    } else if (data.type === 'stats_update') {
+                        updateStats();
+                        updateTasks();
+                    }
+                } catch (e) {
+                    console.error('SSE parse error:', e);
                 }
             };
+            
             eventSource.onerror = function() {
+                console.log('SSE connection error, reconnecting...');
                 setTimeout(connectSSE, 5000);
             };
         }
         
         // Initial load
         updateStats();
+        updateTasks();
         connectSSE();
-        setInterval(updateStats, 10000); // Update stats every 10 seconds
         
-        // Add initial log
-        addLog('System initialized and ready');
+        // Periodic updates
+        statsInterval = setInterval(() => {
+            updateStats();
+            updateTasks();
+        }, 5000);
+        
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', function() {
+            if (eventSource) eventSource.close();
+            if (statsInterval) clearInterval(statsInterval);
+        });
     </script>
 </body>
 </html>
 """
 
-# Create static files and templates
-def setup_directories():
-    # Create HTML template
-    with open("templates/index.html", "w") as f:
-        f.write(HTML_TEMPLATE)
+# Telegram Client setup
+client = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("Starting Telegram Client...")
+    global client
+    client = TelegramClient(SESSION_STRING, int(API_ID), API_HASH)
     
-    # Create simple CSS file
-    css_content = """
-    body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #0f0f0f; color: white; }
-    .container { max-width: 1200px; margin: 0 auto; }
-    """
-    with open("static/style.css", "w") as f:
-        f.write(css_content)
+    try:
+        await client.start(phone=PHONE_NUMBER)
+        if await client.is_user_authorized():
+            me = await client.get_me()
+            logger.info(f"✅ Connected as {me.first_name} (@{me.username})")
+        else:
+            logger.error("❌ Not authorized! Please check your session.")
+    except Exception as e:
+        logger.error(f"❌ Failed to connect: {e}")
+    
+    yield
+    
+    # Shutdown
+    if client and client.is_connected():
+        await client.disconnect()
+        logger.info("Telegram client disconnected")
+
+app = FastAPI(title="Telegram Group Manager", lifespan=lifespan)
 
 # Anti-ban safety functions
 async def safe_delay(min_seconds=30, max_seconds=60):
@@ -384,10 +445,11 @@ async def scrape_members_task(task_id: str, source_group: str, limit: int):
             'progress': 0, 
             'total': limit, 
             'message': f'Scraping from {source_group}',
-            'type': 'scrape'
+            'type': 'scrape',
+            'task_id': task_id
         }
         
-        logger.info(f"Starting to scrape {limit} members from {source_group}")
+        logger.info(f"🔍 Starting to scrape {limit} members from {source_group}")
         
         # Get group entity
         try:
@@ -395,19 +457,22 @@ async def scrape_members_task(task_id: str, source_group: str, limit: int):
             group_title = getattr(entity, 'title', source_group)
             task_status[task_id]['message'] = f'Scraping from: {group_title}'
         except Exception as e:
-            task_status[task_id]['message'] = f'Error: Group not found - {e}'
+            error_msg = f'Error: Group not found - {e}'
+            task_status[task_id]['message'] = error_msg
             task_status[task_id]['status'] = 'error'
+            logger.error(error_msg)
             return
         
         # Get participants
         participants = await client.get_participants(entity, limit=limit)
         total = len(participants)
         
-        logger.info(f"Found {total} participants")
+        logger.info(f"📊 Found {total} participants")
         
         scraped_count = 0
         for i, user in enumerate(participants):
             if task_status[task_id]['status'] == 'stopped':
+                logger.info(f"⏹️ Scraping stopped by user")
                 break
                 
             while task_status[task_id]['status'] == 'paused':
@@ -440,15 +505,16 @@ async def scrape_members_task(task_id: str, source_group: str, limit: int):
                 await asyncio.sleep(0.1)
                 
             except Exception as e:
-                logger.error(f"Error processing user {user.id}: {e}")
+                logger.error(f"❌ Error processing user {user.id}: {e}")
                 continue
         
-        task_status[task_id]['status'] = 'completed'
-        task_status[task_id]['message'] = f'Completed: {scraped_count} users scraped'
-        logger.info(f"Scraping completed: {scraped_count} users")
+        if task_status[task_id]['status'] != 'stopped':
+            task_status[task_id]['status'] = 'completed'
+            task_status[task_id]['message'] = f'Completed: {scraped_count} users scraped'
+            logger.info(f"✅ Scraping completed: {scraped_count} users")
         
     except Exception as e:
-        logger.error(f"Scraping task error: {e}")
+        logger.error(f"❌ Scraping task error: {e}")
         task_status[task_id]['status'] = 'error'
         task_status[task_id]['message'] = f'Error: {str(e)}'
 
@@ -460,10 +526,11 @@ async def add_members_task(task_id: str, target_group: str, users_per_hour: int)
             'progress': 0, 
             'total': 100, 
             'message': f'Adding members to {target_group}',
-            'type': 'add'
+            'type': 'add',
+            'task_id': task_id
         }
         
-        logger.info(f"Starting to add members to {target_group}")
+        logger.info(f"📤 Starting to add members to {target_group}")
         
         # Get target group entity
         try:
@@ -471,8 +538,10 @@ async def add_members_task(task_id: str, target_group: str, users_per_hour: int)
             group_title = getattr(target_entity, 'title', target_group)
             task_status[task_id]['message'] = f'Adding to: {group_title}'
         except Exception as e:
-            task_status[task_id]['message'] = f'Error: Target group not found - {e}'
+            error_msg = f'Error: Target group not found - {e}'
+            task_status[task_id]['message'] = error_msg
             task_status[task_id]['status'] = 'error'
+            logger.error(error_msg)
             return
         
         # Get users who haven't been added yet
@@ -487,15 +556,17 @@ async def add_members_task(task_id: str, target_group: str, users_per_hour: int)
         if total_users == 0:
             task_status[task_id]['message'] = 'No users available to add'
             task_status[task_id]['status'] = 'completed'
+            logger.info("ℹ️ No users available to add")
             return
         
-        logger.info(f"Found {total_users} users to add")
+        logger.info(f"📊 Found {total_users} users to add")
         
         added_count = 0
         failed_count = 0
         
         for i, user in enumerate(users_to_add):
             if task_status[task_id]['status'] == 'stopped':
+                logger.info(f"⏹️ Adding stopped by user")
                 break
                 
             while task_status[task_id]['status'] == 'paused':
@@ -505,13 +576,15 @@ async def add_members_task(task_id: str, target_group: str, users_per_hour: int)
             daily_added = await check_daily_limit()
             if daily_added >= ANTI_BAN_CONFIG['max_daily_adds']:
                 task_status[task_id]['message'] = f'Daily limit reached ({daily_added}/{ANTI_BAN_CONFIG["max_daily_adds"]})'
-                await asyncio.sleep(3600)  # Wait 1 hour
+                logger.warning(f"🛑 Daily limit reached, waiting 1 hour...")
+                await asyncio.sleep(3600)
                 continue
             
             # Check night hours
             if is_night_hours():
                 task_status[task_id]['message'] = 'Auto-paused during night hours'
-                await asyncio.sleep(1800)  # Wait 30 minutes
+                logger.info("🌙 Auto-paused during night hours, waiting 30 minutes...")
+                await asyncio.sleep(1800)
                 continue
             
             try:
@@ -544,29 +617,29 @@ async def add_members_task(task_id: str, target_group: str, users_per_hour: int)
                 await asyncio.sleep(e.seconds + 10)
                 
             except (UserPrivacyRestrictedError, UserNotParticipantError, ChannelPrivateError) as e:
-                logger.warning(f"❌ Cannot add user {user['id']}: {e}")
+                logger.warning(f"❌ Cannot add user {user["id"]}: {e}")
                 failed_count += 1
                 continue
                 
             except Exception as e:
-                logger.error(f"Error adding user {user['id']}: {e}")
+                logger.error(f"❌ Error adding user {user["id"]}: {e}")
                 failed_count += 1
                 continue
         
-        task_status[task_id]['status'] = 'completed'
-        task_status[task_id]['message'] = f'Completed: {added_count} added, {failed_count} failed'
-        logger.info(f"Adding completed: {added_count} users added to {target_group}")
+        if task_status[task_id]['status'] != 'stopped':
+            task_status[task_id]['status'] = 'completed'
+            task_status[task_id]['message'] = f'Completed: {added_count} added, {failed_count} failed'
+            logger.info(f"✅ Adding completed: {added_count} users added to {target_group}")
         
     except Exception as e:
-        logger.error(f"Adding task error: {e}")
+        logger.error(f"❌ Adding task error: {e}")
         task_status[task_id]['status'] = 'error'
         task_status[task_id]['message'] = f'Error: {str(e)}'
 
 # API Routes
 @app.get("/", response_class=HTMLResponse)
-async def read_root(request: Request):
-    setup_directories()
-    return templates.TemplateResponse("index.html", {"request": request})
+async def read_root():
+    return HTMLResponse(content=HTML_TEMPLATE, status_code=200)
 
 @app.post("/api/scrape")
 async def start_scraping(config: ScrapeConfig):
@@ -599,76 +672,85 @@ async def get_tasks():
 
 @app.get("/api/stats")
 async def get_stats():
-    # Total users
-    users_result = supabase.table('scraped_users').select('*', count='exact').execute()
-    total_users = users_result.count or 0
-    
-    # Added today
-    today = datetime.now().date()
-    added_today_result = supabase.table('scraped_users')\
-        .select('*', count='exact')\
-        .gte('added_at', today.isoformat())\
-        .execute()
-    added_today = added_today_result.count or 0
-    
-    # Active tasks
-    active_tasks_count = sum(1 for task in task_status.values() if task['status'] == 'running')
-    
-    return {
-        "total_users": total_users,
-        "added_today": added_today,
-        "active_tasks": active_tasks_count
-    }
+    try:
+        # Total users
+        users_result = supabase.table('scraped_users').select('*', count='exact').execute()
+        total_users = users_result.count or 0
+        
+        # Added today
+        today = datetime.now().date()
+        added_today_result = supabase.table('scraped_users')\
+            .select('*', count='exact')\
+            .gte('added_at', today.isoformat())\
+            .execute()
+        added_today = added_today_result.count or 0
+        
+        # Active tasks
+        active_tasks_count = sum(1 for task in task_status.values() if task['status'] == 'running')
+        
+        return {
+            "total_users": total_users,
+            "added_today": added_today,
+            "active_tasks": active_tasks_count
+        }
+    except Exception as e:
+        logger.error(f"Error getting stats: {e}")
+        return {"total_users": 0, "added_today": 0, "active_tasks": 0}
 
 @app.get("/api/stream")
 async def stream_updates():
     """Server-Sent Events for live updates"""
+    from fastapi.responses import StreamingResponse
+    import json
+    
     async def event_generator():
         while True:
             # Send periodic updates
             await asyncio.sleep(2)
             yield f"data: {json.dumps({'type': 'stats_update', 'timestamp': time.time()})}\n\n"
     
-    return EventSourceResponse(event_generator())
-
-class EventSourceResponse:
-    def __init__(self, generator):
-        self.generator = generator
-    
-    async def __call__(self, scope, receive, send):
-        await send({
-            'type': 'http.response.start',
-            'status': 200,
-            'headers': [
-                [b'content-type', b'text/event-stream'],
-                [b'cache-control', b'no-cache'],
-                [b'connection', b'keep-alive'],
-            ],
-        })
-        
-        async for chunk in self.generator:
-            await send({
-                'type': 'http.response.body',
-                'body': chunk.encode('utf-8'),
-                'more_body': True
-            })
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        }
+    )
 
 # Health check
 @app.get("/health")
 async def health_check():
-    telegram_status = "connected" if client.is_connected() else "disconnected"
+    telegram_status = "connected" if client and client.is_connected() else "disconnected"
     return {
         "status": "healthy",
         "telegram": telegram_status,
         "timestamp": datetime.now().isoformat(),
-        "active_tasks": len(active_tasks)
+        "active_tasks": len(active_tasks),
+        "protection_active": True
     }
+
+@app.get("/api/test-db")
+async def test_db():
+    """Test database connection"""
+    try:
+        result = supabase.table('scraped_users').select('*', count='exact').limit(1).execute()
+        return {
+            "status": "success",
+            "message": f"Database connected. Total records: {result.count}"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 
 if __name__ == "__main__":
     # Create session file if it doesn't exist
     if not os.path.exists("session.session"):
-        open("session.session", "w").close()
+        with open("session.session", "w") as f:
+            f.write("")
+        logger.info("Created session file")
     
-    setup_directories()
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)

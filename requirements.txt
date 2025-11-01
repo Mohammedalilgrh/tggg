@@ -1,10 +1,6 @@
 fastapi==0.104.1
 uvicorn==0.24.0
 telethon==1.28.5
-python-dotenv==1.0.0
 supabase==2.3.1
+python-dotenv==1.0.0
 aiofiles==23.2.1
-pydantic==2.5.0
-postgrest==0.10.6
-realtime==0.1.5
-httpx==0.24.0

@@ -1,7 +1,7 @@
 // Replace the simulate functions with actual API calls
 async function startScraping(channel, count) {
     try {
-        const response = await fetch('https://your-render-app.onrender.com/api/scrape', {
+        const response = await fetch('https://tggg-qmzy.onrender.com/api/scrape', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({channel, count})
@@ -15,7 +15,7 @@ async function startScraping(channel, count) {
 
 async function startAdding(target, count) {
     try {
-        const response = await fetch('https://your-render-app.onrender.com/api/add', {
+        const response = await fetch('https://tggg-qmzy.onrender.com/api/add', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({target, count})

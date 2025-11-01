@@ -1,7 +1,3 @@
-```python
-# main.py
-# pip install fastapi uvicorn telethon python-dotenv supabase aiofiles
-
 import asyncio
 import logging
 import os

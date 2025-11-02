@@ -3,7 +3,7 @@ import asyncio
 import logging
 import time
 import random
-import json
+import threading
 from datetime import datetime
 from flask import Flask, render_template_string, request, jsonify
 from telethon import TelegramClient
@@ -13,6 +13,7 @@ from telethon.errors import (
     UserPrivacyRestrictedError, ChatAdminRequiredError
 )
 from supabase import create_client, Client
+import concurrent.futures
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -36,7 +37,6 @@ except Exception as e:
     supabase = None
 
 # Global variables for task management
-current_task = None
 task_status = "stopped"  # stopped, running, paused
 current_config = {}
 progress_data = {
@@ -47,6 +47,10 @@ progress_data = {
     "current_action": "Ready to start",
     "status": "stopped"
 }
+
+# Event for controlling the background task
+task_event = threading.Event()
+task_thread = None
 
 # HTML Template with modern UI
 HTML_TEMPLATE = '''
@@ -82,16 +86,14 @@ HTML_TEMPLATE = '''
         <div class="bg-white rounded-xl shadow-lg p-6 mb-6">
             <div class="flex items-center justify-between">
                 <div class="flex items-center space-x-4">
-                    <div class="w-3 h-3 rounded-full {{ 'bg-green-500 animate-pulse' if status == 'running' else 'bg-yellow-500' if status == 'paused' else 'bg-red-500' }}"></div>
+                    <div id="statusDot" class="w-3 h-3 rounded-full bg-red-500"></div>
                     <div>
-                        <h2 class="text-xl font-semibold text-gray-800">Status: <span class="capitalize">{{ status }}</span></h2>
-                        <p class="text-gray-600 text-sm" id="currentAction">{{ progress.current_action }}</p>
+                        <h2 class="text-xl font-semibold text-gray-800">Status: <span id="statusText" class="capitalize">stopped</span></h2>
+                        <p class="text-gray-600 text-sm" id="currentAction">Ready to start</p>
                     </div>
                 </div>
                 <div class="text-right">
-                    <div class="text-2xl font-bold text-gray-800" id="progressNumbers">
-                        {{ progress.scraped }}/{{ progress.total }}
-                    </div>
+                    <div class="text-2xl font-bold text-gray-800" id="progressNumbers">0/0</div>
                     <div class="text-sm text-gray-600">Members Processed</div>
                 </div>
             </div>
@@ -136,8 +138,9 @@ HTML_TEMPLATE = '''
                     <label class="block text-sm font-medium text-gray-700 mb-2">
                         <i class="fas fa-list-ol mr-2"></i>Members to Process
                     </label>
-                    <input type="number" id="maxMembers" value="20" min="1" max="100" 
+                    <input type="number" id="maxMembers" value="10" min="1" max="50" 
                            class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                    <p class="text-xs text-gray-500 mt-1">Start small (5-10) for testing</p>
                 </div>
 
                 <!-- Safety Delay -->
@@ -230,7 +233,7 @@ HTML_TEMPLATE = '''
             const config = {
                 source_group: document.getElementById('sourceGroup').value.trim(),
                 target_channel: document.getElementById('targetChannel').value.trim(),
-                max_members: parseInt(document.getElementById('maxMembers').value) || 20,
+                max_members: parseInt(document.getElementById('maxMembers').value) || 10,
                 delay: parseInt(document.getElementById('safetyDelay').value) || 60
             };
 
@@ -244,8 +247,8 @@ HTML_TEMPLATE = '''
                     addLog('Please enter Target Channel!', 'error');
                     return;
                 }
-                if (config.max_members < 1 || config.max_members > 100) {
-                    addLog('Please enter between 1-100 members!', 'error');
+                if (config.max_members < 1 || config.max_members > 50) {
+                    addLog('Please enter between 1-50 members!', 'error');
                     return;
                 }
             }
@@ -289,16 +292,14 @@ HTML_TEMPLATE = '''
                 // Check if response is JSON
                 const contentType = response.headers.get('content-type');
                 if (!contentType || !contentType.includes('application/json')) {
-                    const text = await response.text();
-                    console.error('Non-JSON response:', text.substring(0, 200));
                     return;
                 }
                 
                 const data = await response.json();
                 
                 // Update status indicator
-                document.querySelector('h2 .capitalize').textContent = data.status;
-                const statusDot = document.querySelector('.w-3.h-3');
+                document.getElementById('statusText').textContent = data.status;
+                const statusDot = document.getElementById('statusDot');
                 if (statusDot) {
                     statusDot.className = `w-3 h-3 rounded-full ${
                         data.status === 'running' ? 'bg-green-500 animate-pulse' : 
@@ -344,18 +345,26 @@ class TelegramManager:
     def __init__(self):
         self.client = None
         self.is_connected = False
+        self.loop = None
+        self._client_lock = asyncio.Lock()
         
-    async def initialize_client(self):
+    async def _initialize_client(self):
         """Initialize Telegram client with session string"""
         try:
             if not SESSION_STRING:
                 raise ValueError("SESSION_STRING environment variable is required")
                 
             logger.info("Initializing Telegram client...")
+            
+            # Create new event loop for this thread
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+            
             self.client = TelegramClient(
                 StringSession(SESSION_STRING), 
                 API_ID, 
-                API_HASH
+                API_HASH,
+                loop=self.loop
             )
             
             await self.client.start()
@@ -368,8 +377,16 @@ class TelegramManager:
         except Exception as e:
             logger.error(f"Failed to initialize Telegram client: {e}")
             return False
+
+    def initialize_client(self):
+        """Synchronous wrapper for client initialization"""
+        try:
+            return asyncio.run(self._initialize_client())
+        except Exception as e:
+            logger.error(f"Error in initialize_client: {e}")
+            return False
     
-    async def safe_scrape_members(self, source_group, max_members=20):
+    async def _safe_scrape_members(self, source_group, max_members=10):
         """Safely scrape members from source group with anti-ban measures"""
         try:
             global progress_data
@@ -454,7 +471,7 @@ class TelegramManager:
             progress_data["current_action"] = f"Scraping error: {str(e)}"
             return []
     
-    async def safe_add_members(self, members, target_channel, delay=60):
+    async def _safe_add_members(self, members, target_channel, delay=60):
         """Safely add members to target channel with comprehensive anti-ban measures"""
         try:
             global progress_data
@@ -489,10 +506,10 @@ class TelegramManager:
                         break
                 
                 try:
-                    # Anti-ban: Progressive delay - longer delays as we add more members
+                    # Anti-ban: Progressive delay
                     base_delay = delay
-                    progressive_delay = base_delay + (i * 0.2)  # Increase delay slightly for each member
-                    jitter = random.uniform(0.8, 1.3)  # Random jitter
+                    progressive_delay = base_delay + (i * 0.2)
+                    jitter = random.uniform(0.8, 1.3)
                     actual_delay = progressive_delay * jitter
                     
                     progress_data["current_action"] = f"Adding member {i+1}/{len(members)} (waiting {actual_delay:.1f}s)"
@@ -511,11 +528,10 @@ class TelegramManager:
                     
                     logger.info(f"Successfully added user {member['id']} to channel")
                     
-                    # Anti-ban: Randomize wait time between actions
-                    wait_time = max(actual_delay, 30)  # Minimum 30 seconds
+                    # Anti-ban: Wait with pause/stop checking
+                    wait_time = max(actual_delay, 30)
                     progress_data["current_action"] = f"Added {added_count}/{len(members)} - Safety delay: {wait_time:.1f}s"
                     
-                    # Countdown wait with pause/stop checking
                     for sec in range(int(wait_time)):
                         if task_status == "stopped":
                             break
@@ -524,28 +540,24 @@ class TelegramManager:
                                 await asyncio.sleep(1)
                             if task_status == "stopped":
                                 break
-                        progress_data["current_action"] = f"Added {added_count}/{len(members)} - Waiting {int(wait_time)-sec}s"
                         await asyncio.sleep(1)
                     
                     if task_status == "stopped":
                         break
                         
                 except FloodWaitError as e:
-                    # Handle flood wait - this is critical for anti-ban
-                    wait_time = e.seconds + 10  # Add buffer
+                    # Handle flood wait
+                    wait_time = e.seconds + 10
                     progress_data["current_action"] = f"Flood wait: Waiting {wait_time} seconds"
                     logger.warning(f"Flood wait detected: {wait_time} seconds")
                     
                     await asyncio.sleep(wait_time)
-                    continue  # Retry the same member
+                    continue
                     
                 except (UserPrivacyRestrictedError, UserNotParticipantError, ChatAdminRequiredError) as e:
-                    # Handle specific errors gracefully
                     failed_count += 1
                     progress_data["failed"] = failed_count
                     logger.warning(f"Failed to add user {member['id']}: {type(e).__name__}")
-                    
-                    # Continue with next member
                     continue
                     
                 except Exception as e:
@@ -563,20 +575,79 @@ class TelegramManager:
             progress_data["current_action"] = f"Process error: {str(e)}"
             return 0
 
+    def safe_scrape_members(self, source_group, max_members=10):
+        """Synchronous wrapper for scraping"""
+        try:
+            return asyncio.run(self._safe_scrape_members(source_group, max_members))
+        except Exception as e:
+            logger.error(f"Error in safe_scrape_members: {e}")
+            return []
+
+    def safe_add_members(self, members, target_channel, delay=60):
+        """Synchronous wrapper for adding members"""
+        try:
+            return asyncio.run(self._safe_add_members(members, target_channel, delay))
+        except Exception as e:
+            logger.error(f"Error in safe_add_members: {e}")
+            return 0
+
 # Global manager instance
 manager = TelegramManager()
+
+def background_task(config):
+    """Run the scraping/adding process in background thread"""
+    global task_status, progress_data
+    
+    try:
+        source_group = config.get('source_group', '').strip()
+        target_channel = config.get('target_channel', '').strip()
+        max_members = min(config.get('max_members', 10), 50)
+        delay = max(config.get('delay', 60), 30)
+        
+        logger.info(f"Starting background process: {source_group} -> {target_channel}")
+        
+        # Initialize client if not connected
+        if not manager.is_connected:
+            progress_data["current_action"] = "Connecting to Telegram..."
+            success = manager.initialize_client()
+            if not success:
+                progress_data["current_action"] = "Failed to connect to Telegram"
+                task_status = "stopped"
+                return
+        
+        # Scrape members
+        progress_data["current_action"] = "Starting to scrape members..."
+        members = manager.safe_scrape_members(source_group, max_members)
+        
+        if not members:
+            progress_data["current_action"] = "No members scraped or error occurred"
+            task_status = "stopped"
+            return
+        
+        # Add members to channel
+        progress_data["current_action"] = f"Starting to add {len(members)} members..."
+        added_count = manager.safe_add_members(members, target_channel, delay)
+        
+        progress_data["current_action"] = f"Process completed! Added {added_count} members"
+        
+    except Exception as e:
+        logger.error(f"Error in background task: {e}")
+        progress_data["current_action"] = f"Process error: {str(e)}"
+    finally:
+        task_status = "stopped"
+        progress_data["status"] = "stopped"
 
 @app.route('/')
 def index():
     try:
-        return render_template_string(HTML_TEMPLATE, status=task_status, progress=progress_data)
+        return render_template_string(HTML_TEMPLATE)
     except Exception as e:
         logger.error(f"Error rendering template: {e}")
         return f"Error loading page: {str(e)}", 500
 
 @app.route('/control', methods=['POST'])
 def control_task():
-    global current_task, task_status, current_config
+    global task_status, task_thread, current_config
     
     try:
         if not request.is_json:
@@ -604,15 +675,17 @@ def control_task():
                 "scraped": 0, 
                 "added": 0, 
                 "failed": 0, 
-                "total": min(config.get('max_members', 20), 100),  # Limit to 100 max
+                "total": min(config.get('max_members', 10), 50),
                 "current_action": "Initializing...",
                 "status": "starting"
             })
             
-            # Start the task in background
+            # Start the task in background thread
             task_status = "running"
             current_config = config
-            current_task = asyncio.create_task(run_scraping_adding(config))
+            task_thread = threading.Thread(target=background_task, args=(config,))
+            task_thread.daemon = True
+            task_thread.start()
             
             return jsonify({'success': True, 'message': 'Task started successfully'})
         
@@ -627,8 +700,6 @@ def control_task():
         
         elif action == 'stop':
             task_status = "stopped"
-            if current_task:
-                current_task.cancel()
             progress_data["current_action"] = "Process stopped"
             progress_data["status"] = "stopped"
             return jsonify({'success': True, 'message': 'Task stopped'})
@@ -661,71 +732,18 @@ def health_check():
         'timestamp': datetime.now().isoformat()
     })
 
-async def run_scraping_adding(config):
-    """Main function to run scraping and adding process"""
-    global task_status
-    
-    try:
-        source_group = config.get('source_group', '').strip()
-        target_channel = config.get('target_channel', '').strip()
-        max_members = min(config.get('max_members', 20), 100)  # Safety limit
-        delay = max(config.get('delay', 60), 30)  # Minimum 30 seconds delay for safety
-        
-        logger.info(f"Starting process: {source_group} -> {target_channel}, Members: {max_members}, Delay: {delay}s")
-        
-        # Initialize client if not connected
-        if not manager.is_connected:
-            progress_data["current_action"] = "Connecting to Telegram..."
-            success = await manager.initialize_client()
-            if not success:
-                progress_data["current_action"] = "Failed to connect to Telegram"
-                task_status = "stopped"
-                return
-        
-        # Scrape members
-        progress_data["current_action"] = "Starting to scrape members..."
-        members = await manager.safe_scrape_members(source_group, max_members)
-        
-        if not members:
-            progress_data["current_action"] = "No members scraped or error occurred"
-            task_status = "stopped"
-            return
-        
-        # Add members to channel
-        progress_data["current_action"] = f"Starting to add {len(members)} members with {delay}s safety delays..."
-        added_count = await manager.safe_add_members(members, target_channel, delay)
-        
-        progress_data["current_action"] = f"Process completed! Successfully added {added_count} members"
-        task_status = "stopped"
-        progress_data["status"] = "stopped"
-        
-    except asyncio.CancelledError:
-        logger.info("Task was cancelled")
-        progress_data["current_action"] = "Process cancelled by user"
-    except Exception as e:
-        logger.error(f"Error in main process: {e}")
-        progress_data["current_action"] = f"Process error: {str(e)}"
-    finally:
-        task_status = "stopped"
-        progress_data["status"] = "stopped"
-
 def init_supabase_tables():
-    """Initialize Supabase tables - simplified version"""
+    """Initialize Supabase tables"""
     if not supabase:
         logger.warning("Supabase client not available")
         return
     
     try:
-        # Just test connection - tables will be created manually
+        # Test connection
         result = supabase.table('scraped_members').select('*').limit(1).execute()
         logger.info("Supabase connection test successful")
     except Exception as e:
         logger.warning(f"Supabase tables might not exist yet: {e}")
-
-@app.before_request
-def before_first_request():
-    """Initialize before first request"""
-    init_supabase_tables()
 
 if __name__ == '__main__':
     # Initialize

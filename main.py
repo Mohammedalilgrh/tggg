@@ -3,6 +3,7 @@ import asyncio
 import logging
 import time
 import random
+import json
 from datetime import datetime
 from flask import Flask, render_template_string, request, jsonify
 from telethon import TelegramClient
@@ -12,7 +13,6 @@ from telethon.errors import (
     UserPrivacyRestrictedError, ChatAdminRequiredError
 )
 from supabase import create_client, Client
-import requests
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -136,7 +136,7 @@ HTML_TEMPLATE = '''
                     <label class="block text-sm font-medium text-gray-700 mb-2">
                         <i class="fas fa-list-ol mr-2"></i>Members to Process
                     </label>
-                    <input type="number" id="maxMembers" value="50" min="1" max="1000" 
+                    <input type="number" id="maxMembers" value="20" min="1" max="100" 
                            class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                 </div>
 
@@ -145,9 +145,9 @@ HTML_TEMPLATE = '''
                     <label class="block text-sm font-medium text-gray-700 mb-2">
                         <i class="fas fa-shield-alt mr-2"></i>Safety Delay (seconds)
                     </label>
-                    <input type="number" id="safetyDelay" value="45" min="20" max="120" 
+                    <input type="number" id="safetyDelay" value="60" min="30" max="120" 
                            class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-                    <p class="text-xs text-gray-500 mt-1">Higher delay = More safety</p>
+                    <p class="text-xs text-gray-500 mt-1">Higher delay = More safety (recommended: 60+)</p>
                 </div>
             </div>
         </div>
@@ -228,42 +228,83 @@ HTML_TEMPLATE = '''
 
         async function controlTask(action) {
             const config = {
-                source_group: document.getElementById('sourceGroup').value,
-                target_channel: document.getElementById('targetChannel').value,
-                max_members: parseInt(document.getElementById('maxMembers').value),
-                delay: parseInt(document.getElementById('safetyDelay').value)
+                source_group: document.getElementById('sourceGroup').value.trim(),
+                target_channel: document.getElementById('targetChannel').value.trim(),
+                max_members: parseInt(document.getElementById('maxMembers').value) || 20,
+                delay: parseInt(document.getElementById('safetyDelay').value) || 60
             };
 
-            if ((action === 'start') && (!config.source_group || !config.target_channel)) {
-                addLog('Please fill in both source group and target channel!', 'error');
-                return;
+            // Validation
+            if (action === 'start') {
+                if (!config.source_group) {
+                    addLog('Please enter Source Group!', 'error');
+                    return;
+                }
+                if (!config.target_channel) {
+                    addLog('Please enter Target Channel!', 'error');
+                    return;
+                }
+                if (config.max_members < 1 || config.max_members > 100) {
+                    addLog('Please enter between 1-100 members!', 'error');
+                    return;
+                }
             }
 
             try {
+                addLog(`Sending ${action} command...`, 'info');
+                
                 const response = await fetch('/control', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    },
                     body: JSON.stringify({ action, config })
                 });
                 
+                // Check if response is JSON
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    addLog(`Server error: ${text.substring(0, 100)}`, 'error');
+                    return;
+                }
+                
                 const data = await response.json();
-                addLog(data.message, data.success ? 'success' : 'error');
+                if (data.success) {
+                    addLog(data.message, 'success');
+                } else {
+                    addLog(data.message, 'error');
+                }
             } catch (error) {
                 addLog('Network error: ' + error.message, 'error');
+                console.error('Network error:', error);
             }
         }
 
         async function updateStatus() {
             try {
                 const response = await fetch('/status');
+                
+                // Check if response is JSON
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    console.error('Non-JSON response:', text.substring(0, 200));
+                    return;
+                }
+                
                 const data = await response.json();
                 
                 // Update status indicator
                 document.querySelector('h2 .capitalize').textContent = data.status;
-                document.querySelector('.w-3.h-3').className = `w-3 h-3 rounded-full ${
-                    data.status === 'running' ? 'bg-green-500 animate-pulse' : 
-                    data.status === 'paused' ? 'bg-yellow-500' : 'bg-red-500'
-                }`;
+                const statusDot = document.querySelector('.w-3.h-3');
+                if (statusDot) {
+                    statusDot.className = `w-3 h-3 rounded-full ${
+                        data.status === 'running' ? 'bg-green-500 animate-pulse' : 
+                        data.status === 'paused' ? 'bg-yellow-500' : 'bg-red-500'
+                    }`;
+                }
                 
                 // Update progress
                 document.getElementById('currentAction').textContent = data.progress.current_action;
@@ -285,13 +326,15 @@ HTML_TEMPLATE = '''
             }
         }
 
-        // Update status every 2 seconds
-        setInterval(updateStatus, 2000);
-        updateStatus();
+        // Update status every 3 seconds
+        setInterval(updateStatus, 3000);
+        
+        // Initial status update
+        setTimeout(updateStatus, 1000);
 
         // Add some sample logs for demonstration
-        setTimeout(() => addLog('System check completed. All systems operational.', 'success'), 1000);
-        setTimeout(() => addLog('Telegram client ready. Session is active.', 'success'), 2000);
+        setTimeout(() => addLog('System check completed. All systems operational.', 'success'), 1500);
+        setTimeout(() => addLog('Ready to start scraping process.', 'info'), 2500);
     </script>
 </body>
 </html>
@@ -308,6 +351,7 @@ class TelegramManager:
             if not SESSION_STRING:
                 raise ValueError("SESSION_STRING environment variable is required")
                 
+            logger.info("Initializing Telegram client...")
             self.client = TelegramClient(
                 StringSession(SESSION_STRING), 
                 API_ID, 
@@ -317,7 +361,7 @@ class TelegramManager:
             await self.client.start()
             
             me = await self.client.get_me()
-            logger.info(f"Telegram client initialized successfully for: {me.username or me.first_name}")
+            logger.info(f"Telegram client initialized successfully for: {me.username or me.first_name} (ID: {me.id})")
             self.is_connected = True
             return True
             
@@ -325,12 +369,13 @@ class TelegramManager:
             logger.error(f"Failed to initialize Telegram client: {e}")
             return False
     
-    async def safe_scrape_members(self, source_group, max_members=50):
+    async def safe_scrape_members(self, source_group, max_members=20):
         """Safely scrape members from source group with anti-ban measures"""
         try:
             global progress_data
             
             progress_data["current_action"] = f"Connecting to source group: {source_group}"
+            logger.info(f"Starting to scrape from: {source_group}")
             
             # Get entity with validation
             try:
@@ -339,7 +384,9 @@ class TelegramManager:
                 else:
                     entity = await self.client.get_entity(int(source_group))
             except (ValueError, ChannelPrivateError) as e:
-                progress_data["current_action"] = f"Error: Cannot access group - {str(e)}"
+                error_msg = f"Cannot access group - {str(e)}"
+                progress_data["current_action"] = f"Error: {error_msg}"
+                logger.error(error_msg)
                 return []
             
             progress_data["current_action"] = f"Scraping members from {source_group}"
@@ -377,16 +424,19 @@ class TelegramManager:
                 progress_data["total"] = max_members
                 
                 # Anti-ban: Random delay between scrapes
-                delay = random.uniform(1.0, 3.0)
+                delay = random.uniform(2.0, 5.0)
+                progress_data["current_action"] = f"Scraped {count}/{max_members} (waiting {delay:.1f}s)"
                 await asyncio.sleep(delay)
                 
                 if count >= max_members:
                     break
             
-            # Save to Supabase
+            logger.info(f"Successfully scraped {len(members)} members")
+            
+            # Save to Supabase if available
             if members and supabase:
                 try:
-                    supabase.table('scraped_members').insert({
+                    result = supabase.table('scraped_members').insert({
                         'group_source': source_group,
                         'members': members,
                         'count': len(members),
@@ -404,12 +454,13 @@ class TelegramManager:
             progress_data["current_action"] = f"Scraping error: {str(e)}"
             return []
     
-    async def safe_add_members(self, members, target_channel, delay=45):
+    async def safe_add_members(self, members, target_channel, delay=60):
         """Safely add members to target channel with comprehensive anti-ban measures"""
         try:
             global progress_data
             
             progress_data["current_action"] = f"Connecting to target channel: {target_channel}"
+            logger.info(f"Starting to add {len(members)} members to {target_channel}")
             
             # Get target entity
             try:
@@ -418,7 +469,9 @@ class TelegramManager:
                 else:
                     target_entity = await self.client.get_entity(int(target_channel))
             except (ValueError, ChannelPrivateError) as e:
-                progress_data["current_action"] = f"Error: Cannot access target channel - {str(e)}"
+                error_msg = f"Cannot access target channel - {str(e)}"
+                progress_data["current_action"] = error_msg
+                logger.error(error_msg)
                 return 0
             
             progress_data["current_action"] = f"Starting to add {len(members)} members"
@@ -438,8 +491,8 @@ class TelegramManager:
                 try:
                     # Anti-ban: Progressive delay - longer delays as we add more members
                     base_delay = delay
-                    progressive_delay = base_delay + (i * 0.1)  # Increase delay slightly for each member
-                    jitter = random.uniform(0.8, 1.2)  # Random jitter
+                    progressive_delay = base_delay + (i * 0.2)  # Increase delay slightly for each member
+                    jitter = random.uniform(0.8, 1.3)  # Random jitter
                     actual_delay = progressive_delay * jitter
                     
                     progress_data["current_action"] = f"Adding member {i+1}/{len(members)} (waiting {actual_delay:.1f}s)"
@@ -456,23 +509,13 @@ class TelegramManager:
                     added_count += 1
                     progress_data["added"] = added_count
                     
-                    # Log success
-                    if supabase:
-                        supabase.table('addition_logs').insert({
-                            'user_id': member['id'],
-                            'username': member.get('username', ''),
-                            'target_channel': target_channel,
-                            'added_at': datetime.now().isoformat(),
-                            'success': True,
-                            'attempt_number': i + 1
-                        }).execute()
-                    
                     logger.info(f"Successfully added user {member['id']} to channel")
                     
                     # Anti-ban: Randomize wait time between actions
-                    wait_time = actual_delay + random.uniform(-5, 5)
+                    wait_time = max(actual_delay, 30)  # Minimum 30 seconds
                     progress_data["current_action"] = f"Added {added_count}/{len(members)} - Safety delay: {wait_time:.1f}s"
                     
+                    # Countdown wait with pause/stop checking
                     for sec in range(int(wait_time)):
                         if task_status == "stopped":
                             break
@@ -481,6 +524,7 @@ class TelegramManager:
                                 await asyncio.sleep(1)
                             if task_status == "stopped":
                                 break
+                        progress_data["current_action"] = f"Added {added_count}/{len(members)} - Waiting {int(wait_time)-sec}s"
                         await asyncio.sleep(1)
                     
                     if task_status == "stopped":
@@ -492,14 +536,6 @@ class TelegramManager:
                     progress_data["current_action"] = f"Flood wait: Waiting {wait_time} seconds"
                     logger.warning(f"Flood wait detected: {wait_time} seconds")
                     
-                    # Log flood wait
-                    if supabase:
-                        supabase.table('error_logs').insert({
-                            'error_type': 'flood_wait',
-                            'wait_time': wait_time,
-                            'occurred_at': datetime.now().isoformat()
-                        }).execute()
-                    
                     await asyncio.sleep(wait_time)
                     continue  # Retry the same member
                     
@@ -509,17 +545,6 @@ class TelegramManager:
                     progress_data["failed"] = failed_count
                     logger.warning(f"Failed to add user {member['id']}: {type(e).__name__}")
                     
-                    if supabase:
-                        supabase.table('addition_logs').insert({
-                            'user_id': member['id'],
-                            'username': member.get('username', ''),
-                            'target_channel': target_channel,
-                            'added_at': datetime.now().isoformat(),
-                            'success': False,
-                            'error': type(e).__name__,
-                            'error_message': str(e)
-                        }).execute()
-                    
                     # Continue with next member
                     continue
                     
@@ -527,17 +552,10 @@ class TelegramManager:
                     failed_count += 1
                     progress_data["failed"] = failed_count
                     logger.error(f"Unexpected error adding user {member['id']}: {e}")
-                    
-                    if supabase:
-                        supabase.table('error_logs').insert({
-                            'error_type': 'unexpected',
-                            'error_message': str(e),
-                            'occurred_at': datetime.now().isoformat()
-                        }).execute()
-                    
                     continue
             
             progress_data["current_action"] = f"Completed: Added {added_count}, Failed: {failed_count}"
+            logger.info(f"Process completed: {added_count} added, {failed_count} failed")
             return added_count
             
         except Exception as e:
@@ -550,17 +568,29 @@ manager = TelegramManager()
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE, status=task_status, progress=progress_data)
+    try:
+        return render_template_string(HTML_TEMPLATE, status=task_status, progress=progress_data)
+    except Exception as e:
+        logger.error(f"Error rendering template: {e}")
+        return f"Error loading page: {str(e)}", 500
 
 @app.route('/control', methods=['POST'])
-async def control_task():
+def control_task():
     global current_task, task_status, current_config
     
-    data = request.json
-    action = data.get('action')
-    config = data.get('config', {})
-    
     try:
+        if not request.is_json:
+            return jsonify({'success': False, 'message': 'Content-Type must be application/json'}), 400
+            
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'message': 'Invalid JSON data'}), 400
+            
+        action = data.get('action')
+        config = data.get('config', {})
+        
+        logger.info(f"Received control action: {action}")
+        
         if action == 'start':
             if task_status == 'running':
                 return jsonify({'success': False, 'message': 'Task is already running'})
@@ -574,20 +604,12 @@ async def control_task():
                 "scraped": 0, 
                 "added": 0, 
                 "failed": 0, 
-                "total": config.get('max_members', 50),
+                "total": min(config.get('max_members', 20), 100),  # Limit to 100 max
                 "current_action": "Initializing...",
                 "status": "starting"
             })
             
-            # Initialize client if not connected
-            if not manager.is_connected:
-                progress_data["current_action"] = "Connecting to Telegram..."
-                success = await manager.initialize_client()
-                if not success:
-                    progress_data["current_action"] = "Failed to connect to Telegram"
-                    return jsonify({'success': False, 'message': 'Failed to connect to Telegram. Check SESSION_STRING.'})
-            
-            # Start the task
+            # Start the task in background
             task_status = "running"
             current_config = config
             current_task = asyncio.create_task(run_scraping_adding(config))
@@ -615,15 +637,19 @@ async def control_task():
         
     except Exception as e:
         logger.error(f"Error in control task: {e}")
-        return jsonify({'success': False, 'message': f'Error: {str(e)}'})
+        return jsonify({'success': False, 'message': f'Server error: {str(e)}'}), 500
 
 @app.route('/status')
 def get_status():
-    progress_data["status"] = task_status
-    return jsonify({
-        'status': task_status,
-        'progress': progress_data
-    })
+    try:
+        progress_data["status"] = task_status
+        return jsonify({
+            'status': task_status,
+            'progress': progress_data
+        })
+    except Exception as e:
+        logger.error(f"Error in status endpoint: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
 
 @app.route('/health')
 def health_check():
@@ -631,6 +657,7 @@ def health_check():
         'status': 'healthy',
         'telegram_connected': manager.is_connected,
         'supabase_connected': supabase is not None,
+        'task_status': task_status,
         'timestamp': datetime.now().isoformat()
     })
 
@@ -641,10 +668,19 @@ async def run_scraping_adding(config):
     try:
         source_group = config.get('source_group', '').strip()
         target_channel = config.get('target_channel', '').strip()
-        max_members = config.get('max_members', 50)
-        delay = max(config.get('delay', 45), 20)  # Minimum 20 seconds delay for safety
+        max_members = min(config.get('max_members', 20), 100)  # Safety limit
+        delay = max(config.get('delay', 60), 30)  # Minimum 30 seconds delay for safety
         
         logger.info(f"Starting process: {source_group} -> {target_channel}, Members: {max_members}, Delay: {delay}s")
+        
+        # Initialize client if not connected
+        if not manager.is_connected:
+            progress_data["current_action"] = "Connecting to Telegram..."
+            success = await manager.initialize_client()
+            if not success:
+                progress_data["current_action"] = "Failed to connect to Telegram"
+                task_status = "stopped"
+                return
         
         # Scrape members
         progress_data["current_action"] = "Starting to scrape members..."
@@ -663,51 +699,28 @@ async def run_scraping_adding(config):
         task_status = "stopped"
         progress_data["status"] = "stopped"
         
-        # Log completion
-        if supabase:
-            supabase.table('process_logs').insert({
-                'source_group': source_group,
-                'target_channel': target_channel,
-                'members_scraped': len(members),
-                'members_added': added_count,
-                'completed_at': datetime.now().isoformat(),
-                'success': True
-            }).execute()
-        
     except asyncio.CancelledError:
         logger.info("Task was cancelled")
         progress_data["current_action"] = "Process cancelled by user"
     except Exception as e:
         logger.error(f"Error in main process: {e}")
         progress_data["current_action"] = f"Process error: {str(e)}"
-        
-        # Log error
-        if supabase:
-            supabase.table('error_logs').insert({
-                'error_type': 'process_failure',
-                'error_message': str(e),
-                'occurred_at': datetime.now().isoformat()
-            }).execute()
     finally:
         task_status = "stopped"
         progress_data["status"] = "stopped"
 
 def init_supabase_tables():
-    """Initialize Supabase tables if they don't exist"""
+    """Initialize Supabase tables - simplified version"""
     if not supabase:
+        logger.warning("Supabase client not available")
         return
     
     try:
-        # This will create the tables if they don't exist through Supabase's API
-        tables = ['scraped_members', 'addition_logs', 'error_logs', 'process_logs']
-        for table in tables:
-            try:
-                supabase.table(table).select('*').limit(1).execute()
-                logger.info(f"Table {table} is accessible")
-            except Exception as e:
-                logger.warning(f"Table {table} might not exist: {e}")
+        # Just test connection - tables will be created manually
+        result = supabase.table('scraped_members').select('*').limit(1).execute()
+        logger.info("Supabase connection test successful")
     except Exception as e:
-        logger.error(f"Error initializing Supabase tables: {e}")
+        logger.warning(f"Supabase tables might not exist yet: {e}")
 
 @app.before_request
 def before_first_request():
@@ -715,9 +728,10 @@ def before_first_request():
     init_supabase_tables()
 
 if __name__ == '__main__':
-    # Initialize Supabase tables
+    # Initialize
     init_supabase_tables()
     
     # Start Flask app
     port = int(os.environ.get('PORT', 5000))
+    logger.info(f"Starting Flask app on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)

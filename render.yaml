@@ -1,0 +1,15 @@
+services:
+  - type: worker
+    name: telegram-auto-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: API_ID
+        value: 21706160
+      - key: API_HASH
+        value: 548b91f0e7cd2e44bbee05190620d9f4
+      - key: PHONE_NUMBER
+        value: +96407762476460
+      - key: SESSION_STRING
+        value: your_session_string_here
